@@ -10,6 +10,7 @@ struct Scalars {
   float16_t a1;
   uint16_t a2;
   int16_t a3;
+  uint16_t pad;
 };
 
 RWStructuredBuffer<Scalars> Out : register(u1);
@@ -31,12 +32,15 @@ Shaders:
 Buffers:
   - Name: CBScalars
     Format: Hex16
-    Data: [ 0x3c00, 0x0001, 0xffff ]
+    Data: [ 0x3c00, 0x0001, 0xffff, 0x0,
+            0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+            0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+            0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+            0x0, 0x0, 0x0, 0x0 ]
   - Name: Out
     Format: Hex16
-    # Warp doesn't seem to be able to handle a stride of 6 so we use 8 here...
     Stride: 8
-    FillSize: 8
+    FillSize: 32
 DescriptorSets:
   - Resources:
     - Name: CBScalars
@@ -70,4 +74,4 @@ DescriptorSets:
 
 # CHECK: - Name: Out
 # CHECK:   Format: Hex16
-# CHECK:   Data: [ 0x3C00, 0x1, 0xFFFF, 0x0 ]
+# CHECK:   Data: [ 0x3C00, 0x1, 0xFFFF, 0x0,
