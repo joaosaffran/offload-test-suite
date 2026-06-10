@@ -15,6 +15,7 @@
 #include "Config.h"
 
 #include "API/API.h"
+#include "API/AccelerationStructure.h"
 #include "API/Buffer.h"
 #include "API/Capabilities.h"
 #include "API/CommandBuffer.h"
@@ -124,6 +125,36 @@ struct TraditionalRasterPipelineCreateDesc {
   }
 };
 
+struct MeshShaderRasterPipelineCreateDesc {
+  llvm::SmallVector<Format> RTFormats;
+  std::optional<Format> DSFormat;
+  PrimitiveTopology Topology;
+
+  ShaderContainer MS;
+  std::optional<ShaderContainer> AS;
+  std::optional<ShaderContainer> PS;
+
+  void setShader(Stages Stage, ShaderContainer &&SC) {
+    switch (Stage) {
+    case Stages::Amplification:
+      AS = std::move(SC);
+      break;
+    case Stages::Mesh:
+      MS = std::move(SC);
+      break;
+    case Stages::Pixel:
+      PS = std::move(SC);
+      break;
+    case Stages::Vertex:
+    case Stages::Hull:
+    case Stages::Domain:
+    case Stages::Geometry:
+    case Stages::Compute:
+      llvm_unreachable("Not a mesh raster pipeline stage.");
+    }
+  }
+};
+
 class PipelineState {
 public:
   GPUAPI API;
@@ -190,6 +221,8 @@ protected:
   std::string Description;
   std::string DriverName;
   std::string DriverVersion;
+  std::string GPUGeneration;
+  uint16_t FamilyPrefix = 0;
 
 public:
   virtual const Capabilities &getCapabilities() = 0;
@@ -207,6 +240,11 @@ public:
   createTraditionalRasterPipeline(
       llvm::StringRef Name, const BindingsDesc &BindingsDesc,
       const TraditionalRasterPipelineCreateDesc &Desc) = 0;
+
+  virtual llvm::Expected<std::unique_ptr<PipelineState>>
+  createMeshShaderRasterPipeline(
+      llvm::StringRef Name, const BindingsDesc &BindingsDesc,
+      const MeshShaderRasterPipelineCreateDesc &Desc) = 0;
 
   virtual llvm::Expected<std::unique_ptr<Fence>>
   createFence(llvm::StringRef Name) = 0;
@@ -226,11 +264,35 @@ public:
   virtual llvm::Expected<std::unique_ptr<CommandBuffer>>
   createCommandBuffer() = 0;
 
+  // Sizing queries: return the result/scratch sizes the backend needs to
+  // allocate an AS that can hold the given build inputs. The build-input
+  // pointers (geometry buffers, BLAS handles) are never consulted — only
+  // counts/strides — so these can be called before BLAS handles exist.
+  virtual llvm::Expected<AccelerationStructureSizes>
+  getBLASBuildSizes(llvm::ArrayRef<TriangleGeometryDesc> Triangles) = 0;
+
+  virtual llvm::Expected<AccelerationStructureSizes>
+  getBLASBuildSizes(llvm::ArrayRef<AABBGeometryDesc> AABBs) = 0;
+
+  virtual llvm::Expected<AccelerationStructureSizes>
+  getTLASBuildSizes(uint32_t InstanceCount) = 0;
+
+  // Allocate the AS storage (no GPU build). The build is recorded later via
+  // ComputeEncoder::batchBuildAS(), which is the only place that consumes the
+  // associated *BuildRequest.
+  virtual llvm::Expected<std::unique_ptr<AccelerationStructure>>
+  createBLAS(const AccelerationStructureSizes &Sizes) = 0;
+
+  virtual llvm::Expected<std::unique_ptr<AccelerationStructure>>
+  createTLAS(const AccelerationStructureSizes &Sizes) = 0;
+
   virtual ~Device() = 0;
 
   llvm::StringRef getDescription() const { return Description; }
   llvm::StringRef getDriverName() const { return DriverName; }
   llvm::StringRef getDriverVersion() const { return DriverVersion; }
+  llvm::StringRef getGPUGeneration() const { return GPUGeneration; }
+  uint16_t getFamilyPrefix() const { return FamilyPrefix; }
 };
 
 llvm::Error
@@ -260,6 +322,25 @@ createBufferWithData(Device &Dev, std::string Name,
                      const BufferCreateDesc &Desc, const void *Data,
                      size_t SizeInBytes, ComputeEncoder *Encoder,
                      std::unique_ptr<offloadtest::Buffer> *OutUploadBuffer);
+
+// Builds all BLAS / TLAS objects defined in `P.AccelStructs` using the
+// supplied compute encoder. Uploads each BLAS's vertex/index data, queries
+// sizes via `Dev.getBLASBuildSizes` / `Dev.getTLASBuildSizes`, allocates
+// the handles via `Dev.createBLAS` / `Dev.createTLAS`, and records the GPU
+// builds via two `Enc.batchBuildAS` calls (BLAS batch then TLAS batch — so
+// the AS-build-write barrier between BLAS and TLAS is automatic).
+//
+// Built AS objects are pushed to `OutAS` (in declaration order: BLASes first,
+// then TLASes). Vertex/index buffers used as build inputs are pushed to
+// `OutInputBuffers`; both must outlive command-buffer submission.
+//
+// TODO: `Pipeline` belongs to the test framework, not the rendering backend
+// API. This helper lives here only because `executeProgram` is still on
+// `Device` — once that moves out, this helper should follow.
+llvm::Error buildPipelineAccelerationStructures(
+    Device &Dev, ComputeEncoder &Enc, Pipeline &P,
+    llvm::SmallVectorImpl<std::unique_ptr<AccelerationStructure>> &OutAS,
+    llvm::SmallVectorImpl<std::unique_ptr<Buffer>> &OutInputBuffers);
 
 } // namespace offloadtest
 
